@@ -12,6 +12,10 @@ dist/
 *.zip
 verification*.json
 .mcp.local.json
+projects.json
+*.state.json
+.ssh/
+*.pem
 .env
 .env.*
 !.env.example
