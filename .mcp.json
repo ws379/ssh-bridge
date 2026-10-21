@@ -1,0 +1,29 @@
+{
+  "mcpServers": {
+    "ssh_bridge": {
+      "command": "python",
+      "args": [
+        "server.py"
+      ],
+      "cwd": ".",
+      "enabled": true,
+      "env_vars": [
+        "SSH_BRIDGE_HOST",
+        "SSH_BRIDGE_PORT",
+        "SSH_BRIDGE_ROOT",
+        "SSH_BRIDGE_PROXY_URL",
+        "SSH_BRIDGE_PROXY_REMOTE_PORT",
+        "SSH_BRIDGE_ALLOW_DANGEROUS",
+        "PATH",
+        "USERPROFILE",
+        "HOME",
+        "SSH_BRIDGE_REMOTE_PYTHON",
+        "SSH_BRIDGE_REUSE",
+        "SSH_BRIDGE_TOOLSET",
+        "SSH_BRIDGE_STATE_PATH"
+      ],
+      "startup_timeout_sec": 10,
+      "tool_timeout_sec": 900
+    }
+  }
+}

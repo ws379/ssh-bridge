@@ -1,0 +1,27 @@
+{
+  "name": "ssh-bridge",
+  "version": "0.4.0",
+  "description": "Compact, reusable SSH project workflows with connection reuse, guarded edits and bounded output.",
+  "author": {
+    "name": "SSH Bridge contributors"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "SSH Bridge",
+    "shortDescription": "Work on SSH hosts from local Codex.",
+    "longDescription": "Open remote projects once, reuse named tasks, inspect output on demand and forward local ports using existing SSH configuration.",
+    "developerName": "SSH Bridge contributors",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Open the remote file browser for the configured SSH host.",
+      "Check the configured SSH connection.",
+      "Inspect the remote project and explain its structure.",
+      "Run the requested tests on the remote host."
+    ]
+  },
+  "mcpServers": "./.mcp.json"
+}

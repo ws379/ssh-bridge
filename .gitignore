@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+*.log
+output/
+.playwright-cli/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage*
+build/
+dist/
+*.zip
+verification*.json
+.mcp.local.json
+.env
+.env.*
+!.env.example

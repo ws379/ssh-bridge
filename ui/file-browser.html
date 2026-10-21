@@ -1,0 +1,427 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SSH Bridge 文件浏览器</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f7f7f8;
+      --panel: #ffffff;
+      --line: #dedede;
+      --muted: #6b6b6b;
+      --text: #202123;
+      --accent: #2563eb;
+      --danger: #b42318;
+      --drop: #eff6ff;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root { --bg: #202123; --panel: #2b2c2f; --line: #4a4b4f; --muted: #b2b2b2; --text: #f3f3f3; --drop: #172554; }
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text); font: 13px/1.45 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    button, input, textarea { font: inherit; }
+    button { border: 1px solid var(--line); border-radius: 7px; background: var(--panel); color: var(--text); padding: 6px 9px; cursor: pointer; }
+    button:hover { border-color: var(--accent); }
+    button:disabled { cursor: not-allowed; opacity: .45; }
+    .app { min-height: 420px; display: flex; flex-direction: column; }
+    .toolbar { display: flex; align-items: center; gap: 7px; padding: 9px 11px; border-bottom: 1px solid var(--line); background: var(--panel); }
+    .title { min-width: 0; flex: 1; }
+    .title strong { display: block; font-size: 14px; }
+    .path { overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; }
+    .layout { min-height: 370px; flex: 1; display: grid; grid-template-columns: minmax(220px, 30%) 1fr; }
+    .sidebar, .editor-panel { min-width: 0; background: var(--panel); }
+    .sidebar { border-right: 1px solid var(--line); display: flex; flex-direction: column; }
+    .sidebar-head, .editor-head { display: flex; align-items: center; gap: 6px; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+    .sidebar-head strong, .editor-head strong { flex: 1; }
+    .file-list { flex: 1; min-height: 160px; overflow: auto; padding: 5px; }
+    .file-row { display: flex; align-items: center; gap: 5px; border-radius: 6px; padding: 5px; }
+    .file-row:hover, .file-row.selected { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+    .file-row[draggable="true"] { cursor: grab; }
+    .file-row[draggable="true"]:active { cursor: grabbing; }
+    .file-main { min-width: 0; flex: 1; display: flex; align-items: center; gap: 6px; text-align: left; border: 0; padding: 1px; background: transparent; }
+    .file-main:hover { border-color: transparent; }
+    .file-icon { width: 18px; text-align: center; }
+    .file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .file-size { color: var(--muted); font-size: 11px; white-space: nowrap; }
+    .row-action { padding: 3px 5px; font-size: 11px; }
+    .editor-panel { display: flex; flex-direction: column; }
+    .editor-head .filename { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    textarea { flex: 1; min-height: 255px; width: 100%; resize: none; border: 0; outline: 0; padding: 12px; background: var(--panel); color: var(--text); font: 12px/1.55 ui-monospace, SFMono-Regular, Consolas, monospace; }
+    .drop-zone { margin: 9px 10px 10px; padding: 12px 9px; border: 1px dashed var(--accent); border-radius: 8px; background: var(--drop); color: var(--accent); text-align: center; }
+    .drop-zone.over { outline: 2px solid var(--accent); }
+    .status { min-height: 27px; padding: 5px 10px; color: var(--muted); border-top: 1px solid var(--line); white-space: pre-wrap; }
+    .status.error { color: var(--danger); }
+    .empty { padding: 25px 10px; color: var(--muted); text-align: center; }
+    .primary { border-color: var(--accent); background: var(--accent); color: white; }
+    .danger { color: var(--danger); }
+    @media (max-width: 620px) { .layout { grid-template-columns: 1fr; } .sidebar { max-height: 245px; border-right: 0; border-bottom: 1px solid var(--line); } }
+  </style>
+</head>
+<body>
+  <main class="app">
+    <header class="toolbar">
+      <div class="title"><strong>SSH Bridge · 远程文件</strong><div id="hostPath" class="path">正在连接…</div></div>
+      <button id="refreshBtn" title="刷新">刷新</button>
+      <button id="fullscreenBtn" title="展开">展开</button>
+    </header>
+    <section class="layout">
+      <aside class="sidebar">
+        <div class="sidebar-head"><strong>文件列表</strong><button id="moreBtn" hidden>加载更多</button><button id="upBtn" title="上一级">上一级</button></div>
+        <div id="fileList" class="file-list"><div class="empty">正在读取目录…</div></div>
+        <div class="sidebar-head">
+          <button id="newFileBtn">新建文件</button>
+          <button id="newDirBtn">新建文件夹</button>
+        </div>
+      </aside>
+      <section class="editor-panel">
+        <div class="editor-head">
+          <strong id="editorTitle" class="filename">未选择文件</strong>
+          <button id="renameBtn" disabled>重命名</button>
+          <button id="deleteBtn" class="danger" disabled>删除</button>
+          <button id="saveBtn" class="primary" disabled>保存</button>
+          <button id="sendBtn" disabled>发送到对话</button>
+        </div>
+        <textarea id="editor" spellcheck="false" placeholder="从左侧选择一个文本文件"></textarea>
+        <div id="dropZone" class="drop-zone">把远程文件拖到这里发送到当前对话</div>
+      </section>
+    </section>
+    <div id="status" class="status">准备就绪</div>
+  </main>
+  <script>
+    (() => {
+      "use strict";
+      const state = { host: "", root: ".", path: ".", parent: ".", entries: [], selected: null, content: "", dirty: false, readOnly: true, sha256: null, nextOffset: null, generation: 0 };
+      const $ = (id) => document.getElementById(id);
+      const hostApi = () => window.openai || null;
+
+      function status(message, error = false) {
+        $("status").textContent = message;
+        $("status").classList.toggle("error", error);
+      }
+
+      function bytes(value) {
+        if (!value) return "";
+        if (value < 1024) return `${value} B`;
+        if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+        return `${(value / 1024 / 1024).toFixed(1)} MB`;
+      }
+
+      function samePath(a, b) {
+        const normalize = (value) => {
+          const original = String(value || ".");
+          const trimmed = original.replace(/\/+$/, "");
+          return trimmed || (original.startsWith("/") ? "/" : ".");
+        };
+        return normalize(a) === normalize(b);
+      }
+
+      function unwrap(raw) {
+        let value = raw && raw.result ? raw.result : raw;
+        if (value && value.structuredContent) return value.structuredContent;
+        if (value && value.content) {
+          const text = value.content.find((item) => item.type === "text");
+          if (text) {
+            try { return JSON.parse(text.text); } catch (_) { return { content: text.text }; }
+          }
+        }
+        return value || {};
+      }
+
+      async function callTool(name, args) {
+        const api = hostApi();
+        if (!api || typeof api.callTool !== "function") throw new Error("当前宿主没有提供插件工具调用接口");
+        const compatibility = { ssh_bridge_write: "write", ssh_bridge_mkdir: "mkdir", ssh_bridge_rename: "rename", ssh_bridge_delete: "delete" };
+        const result = compatibility[name]
+          ? await api.callTool("ssh_bridge_workspace", { action: compatibility[name], options: args || {} })
+          : await api.callTool(name, args || {});
+        const value = result && result.result ? result.result : result;
+        if (value && value.isError) {
+          throw new Error((value.content || []).filter(item => item.type === "text").map(item => item.text).join("\n") || "操作失败");
+        }
+        return unwrap(result);
+      }
+
+      function updateHeader() {
+        $("hostPath").textContent = `${state.host || "SSH"} · ${state.path}`;
+        $("upBtn").disabled = samePath(state.path, state.root);
+      }
+
+      function updateEditorButtons() {
+        const hasFile = Boolean(state.selected && state.selected.kind !== "directory");
+        $("editorTitle").textContent = state.selected ? state.selected.path : "未选择文件";
+        $("saveBtn").disabled = !hasFile || !state.dirty || state.readOnly;
+        $("editor").readOnly = state.readOnly;
+        $("sendBtn").disabled = !hasFile;
+        $("renameBtn").disabled = !state.selected;
+        $("deleteBtn").disabled = !state.selected;
+      }
+
+      function renderEntries() {
+        const list = $("fileList");
+        list.replaceChildren();
+        if (!samePath(state.path, state.root)) {
+          const up = document.createElement("button");
+          up.className = "file-main";
+          up.textContent = "📁  ..";
+          up.addEventListener("click", () => loadDirectory(state.parent));
+          const row = document.createElement("div");
+          row.className = "file-row";
+          row.append(up);
+          list.append(row);
+        }
+        if (!state.entries.length) {
+          const empty = document.createElement("div");
+          empty.className = "empty";
+          empty.textContent = "目录为空";
+          list.append(empty);
+          return;
+        }
+        for (const entry of state.entries) {
+          const row = document.createElement("div");
+          row.className = "file-row" + (state.selected && state.selected.path === entry.path ? " selected" : "");
+          row.draggable = entry.kind === "file";
+          row.addEventListener("dragstart", (event) => {
+            event.dataTransfer.setData("application/x-ssh-bridge-entry", JSON.stringify(entry));
+            event.dataTransfer.effectAllowed = "copy";
+          });
+          const main = document.createElement("button");
+          main.className = "file-main";
+          const icon = document.createElement("span");
+          icon.className = "file-icon";
+          icon.textContent = entry.kind === "directory" ? "📁" : entry.kind === "link" ? "🔗" : "📄";
+          const name = document.createElement("span");
+          name.className = "file-name";
+          name.textContent = entry.name;
+          main.append(icon, name);
+          main.addEventListener("click", () => entry.kind === "directory" ? loadDirectory(entry.path) : openFile(entry));
+          row.append(main);
+          if (entry.kind !== "directory") {
+            const size = document.createElement("span");
+            size.className = "file-size";
+            size.textContent = bytes(entry.size);
+            row.append(size);
+          }
+          list.append(row);
+        }
+      }
+
+      async function loadDirectory(path, append = false) {
+        if (!append && state.dirty && !window.confirm("当前文件尚未保存，确认放弃修改？")) return;
+        const generation = ++state.generation;
+        status("正在读取目录…");
+        try {
+          const data = await callTool("ssh_bridge_open_browser", { path, offset: append ? state.nextOffset : 0 });
+          if (generation !== state.generation) return;
+          state.host = data.host || state.host;
+          state.root = data.root || state.root;
+          state.path = data.path || path;
+          state.parent = data.parent || state.path;
+          state.entries = (append ? state.entries : []).concat(Array.isArray(data.entries) ? data.entries : []);
+          state.nextOffset = data.next_offset;
+          $("moreBtn").hidden = !data.has_more;
+          if (append) { renderEntries(); status(`${state.entries.length}/${data.total} 个项目`); return; }
+          state.selected = null;
+          state.content = "";
+          state.dirty = false;
+          state.readOnly = true;
+          state.sha256 = null;
+          $("editor").value = "";
+          updateHeader();
+          updateEditorButtons();
+          renderEntries();
+          status(`${state.entries.length}/${data.total} 个项目`);
+        } catch (error) {
+          status(error.message || String(error), true);
+        }
+      }
+
+      async function readEntry(entry) {
+        const data = await callTool("ssh_bridge_read", { path: entry.path, max_bytes: 1000000 });
+        if (data.binary || data.truncated || data.partial) throw new Error("文件为二进制或超过 1MB，请通过对话按范围读取；已阻止不完整内容覆盖文件。");
+        return typeof data.content === "string" ? data.content : "";
+      }
+
+      async function openFile(entry) {
+        if (state.dirty && !window.confirm("当前文件尚未保存，确认放弃修改？")) return;
+        const generation = ++state.generation;
+        state.selected = entry;
+        state.dirty = false;
+        state.readOnly = true;
+        state.sha256 = null;
+        state.content = "";
+        $("editor").value = "";
+        updateEditorButtons();
+        renderEntries();
+        status(`正在读取 ${entry.name}…`);
+        try {
+          const data = await callTool("ssh_bridge_read", { path: entry.path, max_bytes: 1000000 });
+          if (generation !== state.generation) return;
+          if (data.binary || data.truncated || data.partial) throw new Error("文件为二进制或超过 1MB，请通过对话按范围读取；已禁止编辑。");
+          state.content = data.content;
+          state.sha256 = data.sha256;
+          state.readOnly = false;
+          $("editor").value = state.content;
+          updateEditorButtons();
+          status("文件已打开");
+        } catch (error) {
+          status(error.message || String(error), true);
+        }
+      }
+
+      async function saveFile() {
+        if (!state.selected || state.readOnly) return;
+        const selectedPath = state.selected.path;
+        const generation = state.generation;
+        status("正在保存…");
+        try {
+          const content = $("editor").value;
+          const result = await callTool("ssh_bridge_write", { path: selectedPath, content, create_dirs: true, expected_sha256: state.sha256 });
+          if (generation !== state.generation) return;
+          state.sha256 = result.sha256;
+          state.content = content;
+          state.dirty = $("editor").value !== content;
+          updateEditorButtons();
+          status("已保存");
+        } catch (error) {
+          status(error.message || String(error), true);
+        }
+      }
+
+      async function newFile() {
+        const name = window.prompt("新文件名");
+        if (!name) return;
+        const path = `${state.path.replace(/\/$/, "")}/${name}`;
+        try {
+          await callTool("ssh_bridge_write", { path, content: "", create_dirs: true, overwrite: false });
+          await loadDirectory(state.path);
+          const entry = state.entries.find((item) => item.path === path);
+          if (entry) await openFile(entry);
+        } catch (error) { status(error.message || String(error), true); }
+      }
+
+      async function newDirectory() {
+        const name = window.prompt("新文件夹名");
+        if (!name) return;
+        const path = `${state.path.replace(/\/$/, "")}/${name}`;
+        try { await callTool("ssh_bridge_mkdir", { path }); await loadDirectory(state.path); }
+        catch (error) { status(error.message || String(error), true); }
+      }
+
+      async function renameSelected() {
+        if (!state.selected) return;
+        const name = window.prompt("新的名称", state.selected.name);
+        if (!name || name === state.selected.name) return;
+        const parent = state.selected.path.slice(0, state.selected.path.length - state.selected.name.length).replace(/\/$/, "");
+        const newPath = `${parent}/${name}`;
+        try { await callTool("ssh_bridge_rename", { old_path: state.selected.path, new_path: newPath }); await loadDirectory(state.path); }
+        catch (error) { status(error.message || String(error), true); }
+      }
+
+      async function deleteSelected() {
+        if (!state.selected) return;
+        const recursive = state.selected.kind === "directory";
+        if (!window.confirm(`确认删除 ${state.selected.name}${recursive ? "及其全部内容" : ""}？`)) return;
+        try {
+          await callTool("ssh_bridge_delete", { path: state.selected.path, recursive, confirm: true });
+          await loadDirectory(state.path);
+        } catch (error) { status(error.message || String(error), true); }
+      }
+
+      function mimeFor(name) {
+        const extension = name.split(".").pop().toLowerCase();
+        const map = { json: "application/json", js: "text/javascript", ts: "text/typescript", html: "text/html", css: "text/css", md: "text/markdown", py: "text/x-python", sh: "text/x-shellscript", yaml: "text/yaml", yml: "text/yaml" };
+        return map[extension] || "text/plain";
+      }
+
+      async function sendToConversation(entry, content) {
+        const api = hostApi();
+        if (!api) throw new Error("当前宿主没有提供对话接口");
+        const clipped = content.length > 60000 ? `${content.slice(0, 60000)}\n\n[内容过长，已截断]` : content;
+        let fileId = "";
+        if (typeof api.uploadFile === "function") {
+          try {
+            const uploaded = await api.uploadFile(new File([content], entry.name, { type: mimeFor(entry.name) }));
+            fileId = typeof uploaded === "string" ? uploaded : uploaded && (uploaded.fileId || uploaded.id || "");
+          } catch (_) { /* Fall back to an inline message when file upload is unavailable. */ }
+        }
+        const prompt = fileId
+          ? `请分析我从 SSH 主机 ${state.host} 选中的远程文件 ${entry.path}。插件已上传该文件（file_id: ${fileId}）。`
+          : `请分析下面来自 SSH 主机 ${state.host} 的远程文件 ${entry.path}：\n\n\`\`\`${entry.name}\n${clipped}\n\`\`\``;
+        if (typeof api.sendFollowUpMessage === "function") {
+          await api.sendFollowUpMessage({ prompt, scrollToBottom: true });
+          status("已发送到当前对话");
+          return;
+        }
+        await navigator.clipboard.writeText(prompt);
+        status("当前宿主不支持自动发送，文件内容已复制，请粘贴到对话框");
+      }
+
+      async function sendSelected() {
+        if (!state.selected) return;
+        status("正在准备对话内容…");
+        try {
+          const content = state.content || await readEntry(state.selected);
+          await sendToConversation(state.selected, content);
+        } catch (error) { status(error.message || String(error), true); }
+      }
+
+      async function handleDrop(event) {
+        event.preventDefault();
+        $("dropZone").classList.remove("over");
+        const encoded = event.dataTransfer.getData("application/x-ssh-bridge-entry");
+        try {
+          if (encoded) {
+            const entry = JSON.parse(encoded);
+            if (entry.kind === "directory") return status("请拖放文件，不要拖放文件夹", true);
+            const content = state.selected && state.selected.path === entry.path && state.content ? state.content : await readEntry(entry);
+            await sendToConversation(entry, content);
+            return;
+          }
+          const localFile = event.dataTransfer.files && event.dataTransfer.files[0];
+          if (localFile) {
+            await sendToConversation({ name: localFile.name, path: localFile.name }, await localFile.text());
+            return;
+          }
+          status("没有识别到文件", true);
+        } catch (error) { status(error.message || String(error), true); }
+      }
+
+      $("editor").addEventListener("input", () => { state.dirty = $("editor").value !== state.content; updateEditorButtons(); });
+      $("refreshBtn").addEventListener("click", () => loadDirectory(state.path));
+      $("moreBtn").addEventListener("click", () => loadDirectory(state.path, true));
+      $("upBtn").addEventListener("click", () => loadDirectory(state.parent));
+      $("newFileBtn").addEventListener("click", newFile);
+      $("newDirBtn").addEventListener("click", newDirectory);
+      $("saveBtn").addEventListener("click", saveFile);
+      $("renameBtn").addEventListener("click", renameSelected);
+      $("deleteBtn").addEventListener("click", deleteSelected);
+      $("sendBtn").addEventListener("click", sendSelected);
+      $("dropZone").addEventListener("dragover", (event) => { event.preventDefault(); $("dropZone").classList.add("over"); });
+      $("dropZone").addEventListener("dragleave", () => $("dropZone").classList.remove("over"));
+      $("dropZone").addEventListener("drop", handleDrop);
+      $("fullscreenBtn").addEventListener("click", () => {
+        const api = hostApi();
+        if (api && typeof api.requestDisplayMode === "function") api.requestDisplayMode({ mode: "fullscreen" });
+      });
+      window.addEventListener("message", (event) => {
+        const data = event.data || {};
+        const output = data.params && (data.params.result || data.params.toolResult);
+        if (output && output.structuredContent && output.structuredContent.entries) {
+          const value = output.structuredContent;
+          state.host = value.host || state.host;
+          state.root = value.root || state.root;
+          state.path = value.path || state.path;
+          state.parent = value.parent || state.parent;
+          state.entries = value.entries;
+          updateHeader();
+          renderEntries();
+        }
+      });
+      updateEditorButtons();
+      loadDirectory(".");
+    })();
+  </script>
+</body>
+</html>
