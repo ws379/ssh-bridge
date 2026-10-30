@@ -125,7 +125,7 @@ class Runtime:
         options = copy.deepcopy(args)
         if suffix == "workspace":
             data = self.workspace.handle(options)
-            failed = (data.get("exit_code", 0) != 0 or any(not item.get("ok", True) for item in data.get("results", []))
+            failed = (data.get("exit_code") not in (None, 0) or any(not item.get("ok", True) for item in data.get("results", []))
                       or any("error" in item for item in data.get("files", [])))
             return self.ns["_structured_result"](data, f"workspace {options.get('action', 'open')}: {'failed' if failed else 'ok'}; see structuredContent", is_error=failed)
         if suffix == "status" and self.workspace.path:
@@ -248,8 +248,8 @@ def install(ns):
     tools.append(tool("edit", "Replace exactly one old_text occurrence atomically; avoids resending entire files. Read before editing.",
                       {"path": path, "old_text": {"type": "string", "minLength": 1}, "new_text": {"type": "string"},
                        "expected_sha256": {"type": "string", "pattern": "[a-fA-F0-9]{64}"}}, ["path", "old_text", "new_text"], False))
-    tools.append(tool("workspace", "Open a project once; reuse paths/tasks. Actions: open/list/search/tail/status/recent/tasks/save_task/run/result/forward/ports/close_forward/reconnect. options holds action arguments; help lists them. Commands over 4KB return output_id for result pages.",
-                      {"action": {"type": "string", "enum": ["open", "list", "search", "tail", "status", "recent", "tasks", "save_task", "run", "result", "forward", "ports", "close_forward", "reconnect", "write", "mkdir", "rename", "delete", "help"]},
+    tools.append(tool("workspace", "Open a project once; reuse paths/tasks. Actions include job_track/job_status/jobs/job_logs/gpu for read-only process tracking, plus open/search/tail/tasks/run/result/forward. Call help for options.",
+                      {"action": {"type": "string", "enum": ["open", "list", "search", "tail", "status", "recent", "tasks", "save_task", "run", "result", "forward", "ports", "close_forward", "reconnect", "write", "mkdir", "rename", "delete", "help", "job_track", "job_status", "job_logs", "job_untrack", "jobs", "gpu"]},
                        "path": path, "name": {"type": "string"}, "options": {"type": "object"}}, ["action"], False))
     def compact(schema):
         # Property names and tool descriptions carry the contract. Avoid loading

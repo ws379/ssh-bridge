@@ -164,5 +164,3 @@ class Connection:
                 process.stdin.close()
             except OSError:
                 pass
-
-\n

@@ -315,5 +315,91 @@ class ConnectionTests(unittest.TestCase):
                 connection.close()
 
 
+class JobInspectionTests(unittest.TestCase):
+    def test_incremental_log_cursor_handles_utf8_and_truncation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / 'train.log'
+            log.write_bytes('A中B'.encode('utf-8'))
+            first = remote.job_log({'log_path': 'train.log', 'offset': 0, 'max_bytes': 3}, directory)
+            self.assertEqual((first['content'], first['next_offset'], first['pending_utf8_bytes']), ('A', 1, 2))
+            second = remote.job_log({'log_path': 'train.log', 'offset': first['next_offset'],
+                                     'max_bytes': 4, 'log_id': first['log_id']}, directory)
+            self.assertEqual(second['content'], '中B')
+            self.assertFalse(second['has_more'])
+            log.write_bytes(b'x')
+            reset = remote.job_log({'log_path': 'train.log', 'offset': second['next_offset'],
+                                    'log_id': second['log_id']}, directory)
+            self.assertTrue(reset['reset_required'])
+            self.assertEqual(reset['next_offset'], 0)
+            with self.assertRaises(remote.OperationError):
+                remote.job_log({'log_path': '../outside'}, directory)
+
+    def test_gpu_association_and_pid_reuse(self):
+        process = {'pid': 7, 'status': 'running', 'identity': 'identity-a', 'exit_code': None}
+        gpu = {'available': True, 'processes_complete': True, 'gpus': [{'uuid': 'gpu-a', 'index': '0'}],
+               'processes': [{'pid': 8, 'gpu_uuid': 'gpu-a', 'memory_used_mib': '100'}]}
+        with patch.object(remote, 'process_info', return_value=process), patch.object(remote, '_descends_from', return_value=True):
+            card = remote.inspect_job({'pid': 7, 'identity': 'identity-a'}, '', gpu)
+            self.assertEqual(card['gpu_processes'][0]['gpu_index'], '0')
+            self.assertTrue(card['identity_match'])
+            reused = remote.inspect_job({'pid': 7, 'identity': 'identity-old'}, '', gpu)
+            self.assertEqual(reused['status'], 'pid_reused')
+            self.assertEqual(reused['gpu_processes'], [])
+            self.assertIsNone(reused['exit_code'])
+        with patch.object(remote, 'process_info', side_effect=[process, dict(process, identity='identity-new')]), \
+                patch.object(remote, '_descends_from', return_value=True):
+            stale = remote.inspect_job({'pid': 7}, '', gpu)
+        self.assertEqual(stale['gpu_processes'], [])
+        self.assertTrue(stale['gpu_association_stale'])
+
+    def test_gpu_snapshot_parses_and_reports_missing_support(self):
+        from types import SimpleNamespace
+        responses = [SimpleNamespace(returncode=0, stdout='0, GPU-a, Test GPU, 8192, 1024, 20\n', stderr=''),
+                     SimpleNamespace(returncode=0, stdout='123, GPU-a, 512\n', stderr='')]
+        with patch.object(remote.shutil, 'which', return_value='nvidia-smi'), \
+                patch.object(remote.subprocess, 'run', side_effect=responses):
+            snapshot = remote.gpu_snapshot()
+        self.assertTrue(snapshot['available'])
+        self.assertEqual(snapshot['gpus'][0]['uuid'], 'GPU-a')
+        self.assertEqual(snapshot['processes'][0]['pid'], 123)
+        with patch.object(remote.shutil, 'which', return_value=None):
+            self.assertFalse(remote.gpu_snapshot()['available'])
+
+    def test_tracked_job_survives_new_workspace_session(self):
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {
+                'SSH_BRIDGE_HOST': 'test-host', 'SSH_BRIDGE_STATE_PATH': str(Path(directory) / 'projects.json')}):
+            runtime = Runtime(vars(server))
+            runtime.workspace.path = '/demo'
+            card = {'pid': 42, 'status': 'running', 'identity': 'stable-identity', 'exit_code': None}
+            with patch.object(runtime, 'call', return_value=card):
+                tracked = runtime.workspace.handle({'action': 'job_track', 'name': 'train',
+                                                    'options': {'pid': 42, 'log_path': 'train.log'}})
+            self.assertTrue(tracked['tracked'])
+            other = Runtime(vars(server))
+            other.workspace.path = '/demo'
+            with patch.object(other, 'call', return_value=dict(card)) as call:
+                other.workspace.handle({'action': 'job_status', 'name': 'train', 'options': {'include_gpu': False}})
+            self.assertEqual(call.call_args.args[1]['identity'], 'stable-identity')
+            self.assertEqual(call.call_args.args[1]['log_path'], '/demo/train.log')
+            with patch.object(other, 'call', side_effect=AssertionError('duplicate name must not contact remote')):
+                with self.assertRaises(ValueError):
+                    other.workspace.handle({'action': 'job_track', 'name': 'train', 'options': {'pid': 42}})
+            with patch.object(other, 'call', side_effect=AssertionError('must not touch remote process')):
+                removed = other.workspace.handle({'action': 'job_untrack', 'name': 'train'})
+            self.assertTrue(removed['untracked'])
+            self.assertFalse(removed['process_affected'])
+
+    def test_unknown_exit_code_is_not_a_tool_error(self):
+        with patch.object(server.RUNTIME.workspace, 'handle', return_value={'pid': 42, 'status': 'running', 'exit_code': None}):
+            result = server._workspace({'action': 'job_status', 'options': {'pid': 42}})
+        self.assertFalse(result['isError'])
+
+    @unittest.skipUnless(sys.platform == 'linux', 'Linux /proc is required')
+    def test_real_process_identity(self):
+        info = remote.process_info(os.getpid())
+        self.assertEqual(info['status'], 'running')
+        self.assertEqual(len(info['identity']), 24)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

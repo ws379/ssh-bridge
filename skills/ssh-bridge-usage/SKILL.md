@@ -18,6 +18,8 @@ Workspace actions accept action-specific `options`:
 - `result`: output_id, stream=stdout|stderr, offset/max_bytes or tail=true. Large command output stays in this MCP process for at most one hour. Use output_mode=full only when needed.
 - `forward`: remote_port, optional local_port (0 chooses a free port). `ports` lists tunnels; `close_forward` takes local_port. Both ends bind to loopback.
 - `recent`, `reconnect`, `help` provide project reuse, a fresh connection and action options.
+- `job_track`: name + options.pid and optional log_path tracks an existing Linux process locally. `job_status` accepts that name or options.pid; `jobs` pages tracked cards; `gpu` lists NVIDIA devices and compute PIDs. GPU association uses a sampled parent chain and may be incomplete. `include_gpu=false` skips the GPU queries.
+- `job_logs`: name + options.offset/max_bytes/log_id; reuse returned next_offset and log_id. On reset_required start at zero. `job_untrack` forgets only the local record. Tracking never launches, stops or resumes a process; an invisible PID has unknown exit status, and PID reuse is reported separately.
 
 SSH_BRIDGE_PROXY_URL is a credential-free loopback HTTP proxy, reverse-forwarded only during exec/batch exec. File operations never use that tunnel. Commands with side effects are never replayed automatically.
 

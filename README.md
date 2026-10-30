@@ -13,6 +13,7 @@ SSH Bridge 是一个面向 Codex 的轻量 MCP 服务，通过本机现有的 Op
 - **可靠编辑**：精确替换必须唯一匹配；写入采用临时文件和原子替换，可使用读取结果中的 SHA-256 检测并发修改；路径检查会解析符号链接并限制在配置的工作区内。
 - **远程文件浏览器**：支持目录分页、编辑冲突提示和未保存更改确认。只有支持 MCP Apps 的客户端会显示交互式面板。
 - **SSH 端口转发**：建立到远程端口的本机回环转发，也可选择性地为远程命令建立临时 HTTP 代理反向隧道。代理只用于 `exec` 和批处理中的命令，不改变 SSH 自身的网络路由。
+- **训练进程观察**：按名称追踪已有 Linux 进程，一次查看状态、启动时间、工作目录、日志尾部及关联 GPU；记录保存在本机，重连后仍可查询，日志支持增量读取。
 
 ## 环境要求
 
@@ -74,6 +75,30 @@ python server.py
 ```
 
 批量操作可在一条请求里先编辑再运行测试，默认遇错停止。若命令输出较大，工具返回 `output_id`，之后通过工作区 `result` 分页读取。
+
+### 追踪正在运行的训练进程
+
+先打开项目，再用已有 PID 注册一个任务名称，日志路径相对于项目目录：
+
+```json
+{"action":"job_track","name":"train","options":{"pid":12345,"log_path":"logs/train.log"}}
+{"action":"job_status","name":"train"}
+{"action":"jobs","options":{"include_gpu":true}}
+{"action":"gpu"}
+```
+
+也可以使用 `{"action":"job_status","options":{"pid":12345}}` 临时查看 PID，不保存记录。`job_track` 记录进程的启动身份；同名记录需要 `replace=true` 才能更新。`jobs` 可用 `offset` 和 `limit` 分页，`include_gpu=false` 可省去 GPU 查询。`job_untrack` 只移除本机记录，不会终止远程进程。
+
+用 `job_logs` 增量读取日志；下一次把返回的 `next_offset` 和 `log_id` 传回。文件被替换或缩短到游标之前时，返回 `reset_required=true`，应从零开始读取。若末尾 UTF-8 字符尚未写完整，游标会停在该字符之前，等后续字节到达或增大 `max_bytes` 后再继续。
+
+下面第二条假设首次返回的 `next_offset` 为 `4096`；`log_id` 也应替换成首次返回的实际值。
+
+```json
+{"action":"job_logs","name":"train","options":{"offset":0,"max_bytes":4096}}
+{"action":"job_logs","name":"train","options":{"offset":4096,"log_id":"上次返回的log_id","max_bytes":4096}}
+```
+
+此功能观察已经存在的进程，不会启动、重启或停止训练。进程不再可见时无法推断其退出原因和退出码，返回的 `exit_code` 为 `null`；PID 被复用时会标记 `pid_reused`，不把新进程当成原任务。状态和 GPU 关联是采样结果；GPU 依赖 `nvidia-smi` 和 Linux 父子进程关系，MPS、容器 PID 命名空间或进程被重新托管时可能无法关联。只能读取当前用户可见的进程信息，GPU 列表则反映 `nvidia-smi` 可见的共享设备。
 
 建立远端 3000 端口的本机转发：
 

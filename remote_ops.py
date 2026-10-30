@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import contextlib
+import codecs
+import csv
 import fnmatch
 import hashlib
 import json
@@ -20,6 +22,157 @@ import socket
 import shlex
 
 MAX_BYTES = 1_000_000
+
+
+def _process_stat(pid):
+    text = (Path('/proc') / str(pid) / 'stat').read_text(encoding='utf-8')
+    fields = text[text.rfind(')') + 2:].split()
+    return fields[0], int(fields[1]), int(fields[19])
+
+
+def process_info(pid):
+    """Inspect a Linux process without treating a missing PID as success."""
+    if sys.platform != 'linux' or not Path('/proc').is_dir():
+        return {'pid': pid, 'status': 'unsupported', 'exit_code': None}
+    directory = Path('/proc') / str(pid)
+    try:
+        owner = directory.stat().st_uid
+        if os.geteuid() != 0 and owner != os.geteuid():
+            return {'pid': pid, 'status': 'inaccessible', 'exit_code': None}
+        state, parent, ticks = _process_stat(pid)
+        boot = Path('/proc/sys/kernel/random/boot_id').read_text(encoding='ascii').strip()
+        identity = hashlib.sha256(('%s:%s:%s' % (boot, pid, ticks)).encode()).hexdigest()[:24]
+        info = {'pid': pid, 'status': 'zombie' if state in ('Z', 'X') else 'running',
+                'process_state': state, 'parent_pid': parent, 'identity': identity, 'exit_code': None}
+        try:
+            boot_time = next(int(line.split()[1]) for line in Path('/proc/stat').read_text().splitlines()
+                             if line.startswith('btime '))
+            info['started_at'] = boot_time + ticks / os.sysconf('SC_CLK_TCK')
+        except (OSError, StopIteration, ValueError):
+            info['started_at'] = None
+        try:
+            with (directory / 'cmdline').open('rb') as stream:
+                raw = stream.read(1025)
+            info['command_truncated'] = len(raw) > 1024
+            info['command'] = raw[:1024].replace(b'\0', b' ').decode('utf-8', 'replace').strip()
+            info['cwd'] = os.readlink(str(directory / 'cwd'))
+        except OSError:
+            info['command'], info['cwd'] = None, None
+        return info
+    except FileNotFoundError:
+        return {'pid': pid, 'status': 'not_visible', 'exit_code': None}
+    except (PermissionError, ProcessLookupError):
+        return {'pid': pid, 'status': 'inaccessible', 'exit_code': None}
+
+
+def gpu_snapshot():
+    executable = shutil.which('nvidia-smi')
+    if not executable:
+        return {'available': False, 'reason': 'nvidia-smi not found', 'gpus': [], 'processes': []}
+    def query(fields):
+        result = subprocess.run([executable, '--query-' + fields[0] + '=' + fields[1],
+                                 '--format=csv,noheader,nounits'], capture_output=True, text=True, timeout=5)
+        if result.returncode:
+            raise RuntimeError(result.stderr.strip()[:300] or 'nvidia-smi query failed')
+        return list(csv.reader(result.stdout.splitlines(), skipinitialspace=True))
+    try:
+        rows = query(('gpu', 'index,uuid,name,memory.total,memory.used,utilization.gpu'))
+        gpus = [dict(zip(('index', 'uuid', 'name', 'memory_total_mib', 'memory_used_mib', 'utilization_percent'), row))
+                for row in rows[:32] if len(row) == 6]
+    except (OSError, subprocess.TimeoutExpired, RuntimeError) as exc:
+        return {'available': False, 'reason': str(exc)[:300], 'gpus': [], 'processes': []}
+    result = {'available': True, 'gpus': gpus, 'gpus_truncated': len(rows) > 32,
+              'gpus_complete': len(rows) <= 32 and len(gpus) == len(rows),
+              'processes': [], 'processes_complete': True}
+    try:
+        rows = query(('compute-apps', 'pid,gpu_uuid,used_gpu_memory'))
+        result['processes'] = [{'pid': int(row[0]), 'gpu_uuid': row[1], 'memory_used_mib': row[2]}
+                               for row in rows[:128] if len(row) == 3 and row[0].strip().isdigit()]
+        result['processes_complete'] = len(rows) <= 128 and len(result['processes']) == len(rows)
+    except (OSError, subprocess.TimeoutExpired, RuntimeError) as exc:
+        result.update(processes_complete=False, process_error=str(exc)[:300])
+    return result
+
+
+def _descends_from(pid, ancestor):
+    seen = set()
+    for _ in range(64):
+        if pid == ancestor:
+            return True
+        if pid <= 1 or pid in seen:
+            break
+        seen.add(pid)
+        try:
+            _, pid, _ = _process_stat(pid)
+        except (OSError, ValueError, IndexError):
+            break
+    return False
+
+
+def job_log(args, root):
+    path, _ = resolve_path(args['log_path'], root)
+    limit = args.get('max_bytes', 4096)
+    offset = args.get('offset', 0)
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 65536:
+        raise OperationError('invalid_argument', 'max_bytes must be 1..65536')
+    if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+        raise OperationError('invalid_argument', 'offset must be a non-negative integer')
+    with path.open('rb') as stream:
+        info = os.fstat(stream.fileno())
+        log_id = hashlib.sha256(('%s:%s' % (info.st_dev, info.st_ino)).encode()).hexdigest()[:20]
+        if offset > info.st_size or args.get('log_id') and args['log_id'] != log_id:
+            return {'path': str(path), 'content': '', 'offset': offset, 'next_offset': 0,
+                    'log_id': log_id, 'size': info.st_size, 'reset_required': True, 'has_more': info.st_size > 0}
+        stream.seek(offset)
+        raw = stream.read(limit)
+    if b'\0' in raw:
+        raise OperationError('binary_file', 'Log must be UTF-8 text')
+    decoder = codecs.getincrementaldecoder('utf-8')('replace')
+    content = decoder.decode(raw, final=False)
+    pending = len(decoder.getstate()[0])
+    next_offset = offset + len(raw) - pending
+    return {'path': str(path), 'content': content, 'offset': offset, 'next_offset': next_offset,
+            'log_id': log_id, 'size': info.st_size, 'mtime_ns': info.st_mtime_ns, 'reset_required': False,
+            'pending_utf8_bytes': pending,
+            'has_more': next_offset < info.st_size}
+
+
+def inspect_job(args, root, gpu=None):
+    pid = args.get('pid')
+    if isinstance(pid, bool) or not isinstance(pid, int) or not 1 <= pid <= 2147483647:
+        raise OperationError('invalid_argument', 'pid must be a positive integer')
+    info = process_info(pid)
+    expected = args.get('identity')
+    if expected and info.get('identity') and info['identity'] != expected:
+        info = {'pid': pid, 'status': 'pid_reused', 'exit_code': None, 'identity_match': False}
+    elif expected:
+        info['identity_match'] = True if info.get('identity') == expected else None
+    log_path = args.get('log_path')
+    if log_path:
+        tail_bytes = args.get('tail_bytes', 1024)
+        if isinstance(tail_bytes, bool) or not isinstance(tail_bytes, int) or not 1 <= tail_bytes <= 4096:
+            raise OperationError('invalid_argument', 'tail_bytes must be 1..4096')
+        path, _ = resolve_path(log_path, root)
+        try:
+            size = path.stat().st_size
+            log = job_log({'log_path': log_path, 'offset': max(0, size - tail_bytes),
+                           'max_bytes': tail_bytes}, root)
+            info['log'] = log
+        except FileNotFoundError:
+            info['log'] = {'path': str(path), 'missing': True}
+    if args.get('include_gpu', True):
+        gpu = gpu if gpu is not None else gpu_snapshot()
+        info['gpu_available'] = gpu['available']
+        if not gpu['available']:
+            info['gpu_reason'] = gpu.get('reason')
+        info['gpu_processes_complete'] = gpu.get('processes_complete', False)
+        matches = [item for item in gpu.get('processes', [])
+                   if info['status'] == 'running' and _descends_from(item['pid'], pid)]
+        if info.get('identity') and process_info(pid).get('identity') != info['identity']:
+            matches, info['gpu_association_stale'] = [], True
+        indices = {item['uuid']: item['index'] for item in gpu.get('gpus', [])}
+        info['gpu_processes'] = [dict(item, gpu_index=indices.get(item['gpu_uuid'])) for item in matches]
+    return info
 
 
 class OperationError(Exception):
@@ -247,6 +400,30 @@ def search_files(path, bound, args):
 
 def dispatch(request):
     op, args, root = request["op"], request.get("args", {}), request.get("root", "")
+    if op == 'gpu_snapshot':
+        return gpu_snapshot()
+    if op == 'job_inspect':
+        return inspect_job(args, root)
+    if op == 'job_logs':
+        return job_log(args, root)
+    if op == 'jobs_snapshot':
+        jobs = args.get('jobs', [])
+        if not isinstance(jobs, list) or len(jobs) > 20:
+            raise OperationError('invalid_argument', 'jobs must contain at most 20 entries')
+        include_gpu = args.get('include_gpu', True)
+        gpu = gpu_snapshot() if include_gpu else None
+        cards = []
+        for job in jobs:
+            try:
+                card = inspect_job(dict(job, include_gpu=include_gpu), root, gpu)
+                card['name'] = job['name']
+                cards.append(card)
+            except Exception as exc:
+                cards.append({'name': job.get('name'), 'pid': job.get('pid'), 'error': error_data(exc)})
+        result = {'jobs': cards}
+        if gpu is not None:
+            result['gpu'] = gpu
+        return result
     if op == "status":
         return {"host": socket.gethostname(), "user": os.environ.get("USER", os.environ.get("USERNAME", "")),
                 "home": str(Path.home()), "cwd": str(Path.cwd()), "os": platform.system(),
